@@ -1,0 +1,177 @@
+//@version=5
+strategy("Crypto Trading Strategy with ADX Filter and Volume Confirmation", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// Input parameters
+useADXFilter = input.bool(true, "Use ADX Filter")
+adxThreshold = input.int(20, "ADX Threshold", minval=5, maxval=100, step=1)
+adxLength = input.int(14, "ADX Length", minval=5, maxval=50)
+
+useVolumeFilter = input.bool(true, "Use Volume Filter")
+volumeLength = input.int(20, "Volume MA Length", minval=5, maxval=200)
+volumeThreshold = input.float(1.5, "Volume Threshold (x avg)", minval=0.5, maxval=5, step=0.1)
+
+// Take Profit and Stop Loss
+enableTrailingStop = input.bool(true, "Enable Trailing Stop Loss")
+stopLossPercent = input.float(2.0, "Stop Loss %", minval=0.5, maxval=10, step=0.1)
+takeProfitPercent = input.float(3.0, "Take Profit %", minval=0.5, maxval=20, step=0.1)
+trailingStopPercent = input.float(1.5, "Trailing Stop %", minval=0.5, maxval=10, step=0.1)
+
+// EMA Inputs
+fastLength = input.int(9, "Fast EMA Length", minval=5, maxval=50)
+slowLength = input.int(21, "Slow EMA Length", minval=10, maxval=200)
+superSlowLength = input.int(50, "Super Slow EMA Length", minval=30, maxval=300)
+
+// RSI Inputs
+rsiLength = input.int(14, "RSI Length", minval=5, maxval=30)
+rsiOverbought = input.int(70, "RSI Overbought Level", minval=50, maxval=90)
+rsiOversold = input.int(30, "RSI Oversold Level", minval=10, maxval=50)
+
+// Backtesting date range
+fromDate = input.time(timestamp("1 Jan 2020"), "From Date")
+toDate = input.time(timestamp("31 Dec 2025"), "To Date")
+inDateRange = time >= fromDate and time <= toDate
+
+// Alert inputs
+sendWebhookAlert = input.bool(true, "Send webhook alerts")
+alertMessage = input.string("{{strategy.order.action}} {{ticker}} at {{strategy.order.price}}", "Alert Message")
+
+// =========== INDICATOR CALCULATIONS ===========
+
+// EMAs
+fastEMA = ta.ema(close, fastLength)
+slowEMA = ta.ema(close, slowLength)
+superSlowEMA = ta.ema(close, superSlowLength)
+
+// ADX
+[diPlus, diMinus, adx] = ta.dmi(14, adxLength)
+isStrongTrend = adx > adxThreshold
+
+// Volume
+volMA = ta.sma(volume, volumeLength)
+isHighVolume = volume > volMA * volumeThreshold
+
+// RSI
+rsi = ta.rsi(close, rsiLength)
+isOverbought = rsi > rsiOverbought
+isOversold = rsi < rsiOversold
+
+// =========== STRATEGY LOGIC ===========
+
+// Trend direction
+uptrend = fastEMA > slowEMA and close > superSlowEMA
+downtrend = fastEMA < slowEMA and close < superSlowEMA
+
+// Entry conditions
+longCondition = uptrend and (not useADXFilter or isStrongTrend) and (not useVolumeFilter or isHighVolume) and ta.crossover(fastEMA, slowEMA) and isOversold and inDateRange
+shortCondition = downtrend and (not useADXFilter or isStrongTrend) and (not useVolumeFilter or isHighVolume) and ta.crossunder(fastEMA, slowEMA) and isOverbought and inDateRange
+
+// Take profit and stop loss calculations
+longStopPrice = strategy.position_avg_price * (1 - stopLossPercent / 100)
+longTakeProfitPrice = strategy.position_avg_price * (1 + takeProfitPercent / 100)
+shortStopPrice = strategy.position_avg_price * (1 + stopLossPercent / 100)
+shortTakeProfitPrice = strategy.position_avg_price * (1 - takeProfitPercent / 100)
+
+// Trailing stop variables
+var float trailPrice = na
+var float trailingStop = na
+
+// Reset trailing stop on new positions
+if (strategy.position_size == 0)
+    trailPrice := na
+    trailingStop := na
+
+// Update trailing stop for long positions
+if (strategy.position_size > 0 and enableTrailingStop)
+    if (na(trailPrice) or high > trailPrice)
+        trailPrice := high
+        trailingStop := trailPrice * (1 - trailingStopPercent / 100)
+
+// Update trailing stop for short positions
+if (strategy.position_size < 0 and enableTrailingStop)
+    if (na(trailPrice) or low < trailPrice)
+        trailPrice := low
+        trailingStop := trailPrice * (1 + trailingStopPercent / 100)
+
+// Exit conditions
+longExitCondition = (strategy.position_size > 0) and (
+    ta.crossunder(fastEMA, slowEMA) or 
+    (enableTrailingStop and low < trailingStop) or
+    high >= longTakeProfitPrice or
+    low <= longStopPrice
+)
+
+shortExitCondition = (strategy.position_size < 0) and (
+    ta.crossover(fastEMA, slowEMA) or 
+    (enableTrailingStop and high > trailingStop) or
+    low <= shortTakeProfitPrice or
+    high >= shortStopPrice
+)
+
+// =========== STRATEGY EXECUTION ===========
+
+// Open positions
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    
+    if (sendWebhookAlert)
+        alert(alertMessage, alert.freq_once_per_bar_close)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    
+    if (sendWebhookAlert)
+        alert(alertMessage, alert.freq_once_per_bar_close)
+
+// Close positions
+if (longExitCondition)
+    strategy.close("Long")
+    
+    if (sendWebhookAlert)
+        alert("EXIT " + alertMessage, alert.freq_once_per_bar_close)
+
+if (shortExitCondition)
+    strategy.close("Short")
+    
+    if (sendWebhookAlert)
+        alert("EXIT " + alertMessage, alert.freq_once_per_bar_close)
+
+// =========== VISUALIZATIONS ===========
+
+// Plot EMAs
+plot(fastEMA, "Fast EMA", color=color.blue)
+plot(slowEMA, "Slow EMA", color=color.red)
+plot(superSlowEMA, "Super Slow EMA", color=color.purple, linewidth=2)
+
+// Plot ADX
+plot(adx, "ADX", color=color.gray, display=display.none)
+hline(adxThreshold, "ADX Threshold", color=color.gray, linestyle=hline.style_dashed, display=display.none)
+
+// Plot buy/sell signals
+plotshape(longCondition, "Buy Signal", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.normal)
+plotshape(shortCondition, "Sell Signal", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.normal)
+
+// Plot stop loss and take profit levels
+plot(strategy.position_size > 0 ? longStopPrice : na, "Long Stop Loss", color=color.red, style=plot.style_cross)
+plot(strategy.position_size > 0 ? longTakeProfitPrice : na, "Long Take Profit", color=color.green, style=plot.style_cross)
+plot(strategy.position_size < 0 ? shortStopPrice : na, "Short Stop Loss", color=color.red, style=plot.style_cross)
+plot(strategy.position_size < 0 ? shortTakeProfitPrice : na, "Short Take Profit", color=color.green, style=plot.style_cross)
+
+// Plot trailing stop
+plot(strategy.position_size != 0 and enableTrailingStop ? trailingStop : na, "Trailing Stop", color=color.orange, style=plot.style_stepline, linewidth=2)
+
+// Background color for trend
+bgcolor(uptrend ? color.new(color.green, 95) : downtrend ? color.new(color.red, 95) : na)
+
+// =========== PERFORMANCE DISPLAY ===========
+
+// Display strategy statistics
+var table perfTable = table.new(position.top_right, 5, 5, color.black)
+table.cell(perfTable, 0, 0, "Performance Metrics", bgcolor=color.blue, text_color=color.white)
+table.cell(perfTable, 0, 1, "Net Profit:", bgcolor=color.new(color.blue, 90), text_color=color.white)
+table.cell(perfTable, 1, 1, str.tostring(strategy.netprofit), bgcolor=color.new(color.blue, 90), text_color=color.white)
+table.cell(perfTable, 0, 2, "Win Rate:", bgcolor=color.new(color.blue, 90), text_color=color.white)
+table.cell(perfTable, 1, 2, str.tostring(strategy.wintrades / (strategy.wintrades + strategy.losstrades) * 100) + "%", bgcolor=color.new(color.blue, 90), text_color=color.white)
+table.cell(perfTable, 0, 3, "Profit Factor:", bgcolor=color.new(color.blue, 90), text_color=color.white)
+table.cell(perfTable, 1, 3, str.tostring(strategy.grossprofit / strategy.grossloss), bgcolor=color.new(color.blue, 90), text_color=color.white)
+table.cell(perfTable, 0, 4, "Max Drawdown:", bgcolor=color.new(color.blue, 90), text_color=color.white)
+table.cell(perfTable, 1, 4, str.tostring(strategy.max_drawdown), bgcolor=color.new(color.blue, 90), text_color=color.white)
